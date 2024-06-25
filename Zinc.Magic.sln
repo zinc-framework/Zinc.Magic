@@ -1,0 +1,28 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Zinc.Magic", "Zinc.Magic\Zinc.Magic.csproj", "{958DE8EF-EEBA-4AAC-9D67-17A7C7225DC3}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Zinc.Magic.Sample", "Zinc.Magic.Sample\Zinc.Magic.Sample.csproj", "{D0C08A78-268D-4C02-A9F3-6640327C73F2}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Zinc.Magic.Tests", "Zinc.Magic.Tests\Zinc.Magic.Tests.csproj", "{510EDEA8-89BF-4241-9FB5-DC90DB9FFE1B}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{958DE8EF-EEBA-4AAC-9D67-17A7C7225DC3}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{958DE8EF-EEBA-4AAC-9D67-17A7C7225DC3}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{958DE8EF-EEBA-4AAC-9D67-17A7C7225DC3}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{958DE8EF-EEBA-4AAC-9D67-17A7C7225DC3}.Release|Any CPU.Build.0 = Release|Any CPU
+		{D0C08A78-268D-4C02-A9F3-6640327C73F2}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D0C08A78-268D-4C02-A9F3-6640327C73F2}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D0C08A78-268D-4C02-A9F3-6640327C73F2}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D0C08A78-268D-4C02-A9F3-6640327C73F2}.Release|Any CPU.Build.0 = Release|Any CPU
+		{510EDEA8-89BF-4241-9FB5-DC90DB9FFE1B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{510EDEA8-89BF-4241-9FB5-DC90DB9FFE1B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{510EDEA8-89BF-4241-9FB5-DC90DB9FFE1B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{510EDEA8-89BF-4241-9FB5-DC90DB9FFE1B}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal
