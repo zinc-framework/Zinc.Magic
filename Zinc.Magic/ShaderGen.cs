@@ -50,13 +50,6 @@ namespace Zinc.Magic
             {
                 sb.AppendLine($"        public static partial class {p}");
                 sb.AppendLine("        {");
-                // string consts for Uniforms.SetX(...) — autocomplete + typo-resistance
-                sb.AppendLine("            public static class U");
-                sb.AppendLine("            {");
-                foreach (var b in blocks)
-                    foreach (var m in b.Members)
-                        sb.AppendLine($"                public const string {m.Name} = \"{m.Name}\";");
-                sb.AppendLine("            }");
                 foreach (var b in blocks)
                 {
                     if (!b.Supported)
@@ -64,8 +57,10 @@ namespace Zinc.Magic
                         sb.AppendLine($"            // uniform block '{b.GlslName}' ({b.StageName}) skipped: unsupported member type for typed generation");
                         continue;
                     }
+                    // std140 record struct — its [StructLayout(Size)] equals the block size, so handing
+                    // its bytes to sgp_set_uniform is correct by construction.
                     sb.AppendLine($"            [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Explicit, Size = {b.Std140Size})]");
-                    sb.AppendLine($"            public struct {b.StructName}");
+                    sb.AppendLine($"            public record struct {b.StructName}");
                     sb.AppendLine("            {");
                     foreach (var m in b.Members)
                         sb.AppendLine($"                [System.Runtime.InteropServices.FieldOffset({m.Offset})] public {m.CsType} {m.Name};");
@@ -73,34 +68,6 @@ namespace Zinc.Magic
                 }
                 sb.AppendLine("        }");
             }
-            sb.AppendLine("    }");
-            sb.AppendLine("}");
-
-            // Runtime uniform layout (name -> stage/offset/type/size) registered at module load.
-            // Derived from the .glsl std140 parse — available without shdc, so Uniforms.SetX works
-            // as soon as the project builds (the compiled sg_shader still needs the shdc build step).
-            sb.AppendLine();
-            sb.AppendLine("namespace Res.Generated");
-            sb.AppendLine("{");
-            sb.AppendLine($"    internal static class ShaderLayout_{fileBase}");
-            sb.AppendLine("    {");
-            sb.AppendLine("        [System.Runtime.CompilerServices.ModuleInitializer]");
-            sb.AppendLine("        internal static void Init()");
-            sb.AppendLine("        {");
-            foreach (var p in programs)
-            {
-                sb.AppendLine($"            global::Zinc.ShaderRegistry.RegisterLayout(\"{p}\", new (string, global::Zinc.ShaderStage, int, global::Zinc.GlslType, int, int)[]");
-                sb.AppendLine("            {");
-                foreach (var b in blocks)
-                {
-                    if (!b.Supported) continue;
-                    var stage = b.Stage == "vs" ? "Vertex" : "Fragment";
-                    foreach (var m in b.Members)
-                        sb.AppendLine($"                (\"{m.Name}\", global::Zinc.ShaderStage.{stage}, {m.Offset}, global::Zinc.GlslType.{m.Glsl}, {m.Size}, {b.Std140Size}),");
-                }
-                sb.AppendLine("            });");
-            }
-            sb.AppendLine("        }");
             sb.AppendLine("    }");
             sb.AppendLine("}");
 
