@@ -1,9 +1,7 @@
 using System;
-using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.IO;
-using System.Linq;
 using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.Text;
 
 namespace Zinc.Magic
 {
@@ -12,50 +10,70 @@ namespace Zinc.Magic
     {
         public void Initialize(IncrementalGeneratorInitializationContext context)
         {
-            // Get the project directory
+            // Project directory (consuming project), used to locate the res/ folder.
             IncrementalValueProvider<string?> projectDir = context.AnalyzerConfigOptionsProvider
                 .Select((provider, _) => provider.GlobalOptions.TryGetValue("build_property.projectdir", out var dir) ? dir : null);
 
-            // Get all additional files
-            IncrementalValuesProvider<AdditionalText> additionalFiles = context.AdditionalTextsProvider;
+            // Collect ALL additional files together: shader generation needs to read a
+            // reflection .yaml alongside its sibling per-stage source files, so we can't
+            // process one file in isolation. (Collect costs us per-file incrementality,
+            // which is fine for an asset folder.)
+            IncrementalValueProvider<ImmutableArray<AdditionalText>> allFiles =
+                context.AdditionalTextsProvider.Collect();
 
-            // Combine project directory and additional files
-            IncrementalValuesProvider<(string? ProjectDir, AdditionalText File)> resFiles = 
-                additionalFiles.Select((file, _) => (ProjectDir: (string?)null, File: file))
-                               .Combine(projectDir)
-                               .Select((tuple, _) => (tuple.Right, tuple.Left.File));
+            var combined = allFiles.Combine(projectDir);
 
-            // Register the source output
-            context.RegisterSourceOutput(resFiles, (spc, tuple) => GenerateSource(spc, tuple.ProjectDir, tuple.File));
+            context.RegisterSourceOutput(combined, (spc, tuple) => GenerateAll(spc, tuple.Right, tuple.Left));
         }
 
-        private void GenerateSource(SourceProductionContext context, string? projectDir, AdditionalText additionalFile)
+        private void GenerateAll(SourceProductionContext context, string? projectDir, ImmutableArray<AdditionalText> files)
         {
-            if (string.IsNullOrEmpty(projectDir) || additionalFile == null)
+            if (string.IsNullOrEmpty(projectDir))
                 return;
 
-            var resPath = new DirectoryInfo(Path.Combine(projectDir, "res"));
+            var resPath = new DirectoryInfo(Path.Combine(projectDir!, "res"));
 
-            if (!resPath.ContainsPath(additionalFile.Path))
-                return;
+            foreach (var file in files)
+            {
+                var path = file.Path;
+                var ext = Path.GetExtension(path);
+                if (string.IsNullOrEmpty(ext))
+                    continue;
 
-            var ext = Path.GetExtension(additionalFile.Path);
-            if (string.IsNullOrEmpty(ext))
-                return;
+                // shdc reflection lands in the intermediate (obj) dir, not res/ — match it
+                // by suffix wherever it is. It drives the build-time sg_shader factory.
+                if (path.EndsWith("_reflection.yaml", StringComparison.OrdinalIgnoreCase))
+                {
+                    ShaderGen.EmitDesc(context, file, files);
+                    continue;
+                }
 
-            var cw = new Utils.CodeWriter();
-            cw.OpenScope(@"
+                if (!resPath.ContainsPath(path))
+                    continue;
+
+                // .glsl authoring: emit the typesafe stub + std140 uniform structs from the
+                // source alone (no shdc), so the IDE has them even before a build.
+                if (ext.Equals(".glsl", StringComparison.OrdinalIgnoreCase))
+                {
+                    ShaderGen.EmitStub(context, file);
+                    continue;
+                }
+
+                // Existing typed-asset routing (textures, etc.)
+                var cw = new Utils.CodeWriter();
+                cw.OpenScope(@"
 using static Zinc.Core.Assets;
 
 namespace Res;
 
 public static partial class Assets");
 
-            AssetRouter.RouteAsset(context, cw, additionalFile, ext);
+                AssetRouter.RouteAsset(context, cw, file, ext);
 
-            cw.CloseScope();
+                cw.CloseScope();
 
-            context.AddSource($"Res_{Path.GetFileNameWithoutExtension(additionalFile.Path)}.g.cs", cw.ToString());
+                context.AddSource($"Res_{Path.GetFileNameWithoutExtension(path)}.g.cs", cw.ToString());
+            }
         }
     }
 
