@@ -272,6 +272,60 @@ namespace Zinc.Magic
                 }
             }
 
+            // Sampled textures. Reflection nests each under a `texture:` key (the other view kinds
+            // are storage_buffer/storage_image, which sgp shaders don't use).
+            if (GetVal(p, "views") is List<object> views)
+            {
+                foreach (var vObj in views)
+                {
+                    if (!(vObj is Dictionary<string, object> v)) continue;
+                    if (!(GetVal(v, "texture") is Dictionary<string, object> t)) continue;
+                    var slot = GetVal(t, "slot") as string ?? "0";
+                    var stage = GetVal(t, "stage") as string ?? "fragment";
+                    var imgType = GetVal(t, "type") as string ?? "2d";
+                    var sampleType = GetVal(t, "sample_type") as string ?? "float";
+                    var multisampled = string.Equals(GetVal(t, "multisampled") as string, "true", StringComparison.OrdinalIgnoreCase);
+                    var mslTex = GetVal(t, "msl_texture_n") as string ?? slot;
+                    sb.AppendLine($"                d.views[{slot}].texture.stage = sg_shader_stage.{Stage(stage)};");
+                    sb.AppendLine($"                d.views[{slot}].texture.image_type = sg_image_type.{ImageType(imgType)};");
+                    sb.AppendLine($"                d.views[{slot}].texture.sample_type = sg_image_sample_type.{SampleType(sampleType)};");
+                    sb.AppendLine($"                d.views[{slot}].texture.multisampled = {(multisampled ? "1" : "0")};");
+                    sb.AppendLine($"                d.views[{slot}].texture.msl_texture_n = {mslTex};");
+                }
+            }
+
+            if (GetVal(p, "samplers") is List<object> samplers)
+            {
+                foreach (var sObj in samplers)
+                {
+                    if (!(sObj is Dictionary<string, object> s)) continue;
+                    var slot = GetVal(s, "slot") as string ?? "0";
+                    var stage = GetVal(s, "stage") as string ?? "fragment";
+                    var smpType = GetVal(s, "sampler_type") as string ?? "filtering";
+                    var mslSmp = GetVal(s, "msl_sampler_n") as string ?? slot;
+                    sb.AppendLine($"                d.samplers[{slot}].stage = sg_shader_stage.{Stage(stage)};");
+                    sb.AppendLine($"                d.samplers[{slot}].sampler_type = sg_sampler_type.{SamplerType(smpType)};");
+                    sb.AppendLine($"                d.samplers[{slot}].msl_sampler_n = {mslSmp};");
+                }
+            }
+
+            // Every texture view must be referenced by a texture-sampler pair (sokol validation);
+            // glsl_name is only required on GL backends, so it's omitted for metal_macos.
+            if (GetVal(p, "texture_sampler_pairs") is List<object> pairs)
+            {
+                foreach (var prObj in pairs)
+                {
+                    if (!(prObj is Dictionary<string, object> pr)) continue;
+                    var slot = GetVal(pr, "slot") as string ?? "0";
+                    var stage = GetVal(pr, "stage") as string ?? "fragment";
+                    var viewSlot = GetVal(pr, "view_slot") as string ?? "0";
+                    var smpSlot = GetVal(pr, "sampler_slot") as string ?? "0";
+                    sb.AppendLine($"                d.texture_sampler_pairs[{slot}].stage = sg_shader_stage.{Stage(stage)};");
+                    sb.AppendLine($"                d.texture_sampler_pairs[{slot}].view_slot = {viewSlot};");
+                    sb.AppendLine($"                d.texture_sampler_pairs[{slot}].sampler_slot = {smpSlot};");
+                }
+            }
+
             sb.AppendLine("                return Gfx.make_shader(&d);");
             sb.AppendLine("            }");
             sb.AppendLine("        }");
@@ -298,6 +352,39 @@ namespace Zinc.Magic
                 case "vertex": return "SG_SHADERSTAGE_VERTEX";
                 case "compute": return "SG_SHADERSTAGE_COMPUTE";
                 default: return "SG_SHADERSTAGE_FRAGMENT";
+            }
+        }
+
+        private static string ImageType(string s)
+        {
+            switch (s)
+            {
+                case "cube": return "SG_IMAGETYPE_CUBE";
+                case "3d": return "SG_IMAGETYPE_3D";
+                case "array": return "SG_IMAGETYPE_ARRAY";
+                default: return "SG_IMAGETYPE_2D";
+            }
+        }
+
+        private static string SampleType(string s)
+        {
+            switch (s)
+            {
+                case "depth": return "SG_IMAGESAMPLETYPE_DEPTH";
+                case "sint": return "SG_IMAGESAMPLETYPE_SINT";
+                case "uint": return "SG_IMAGESAMPLETYPE_UINT";
+                case "unfilterable_float": return "SG_IMAGESAMPLETYPE_UNFILTERABLE_FLOAT";
+                default: return "SG_IMAGESAMPLETYPE_FLOAT";
+            }
+        }
+
+        private static string SamplerType(string s)
+        {
+            switch (s)
+            {
+                case "nonfiltering": return "SG_SAMPLERTYPE_NONFILTERING";
+                case "comparison": return "SG_SAMPLERTYPE_COMPARISON";
+                default: return "SG_SAMPLERTYPE_FILTERING";
             }
         }
 
