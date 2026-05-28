@@ -187,21 +187,104 @@ namespace Zinc.Magic
             if (!(root is Dictionary<string, object> rootMap)) return;
             if (!(GetVal(rootMap, "shaders") is List<object> shaders)) return;
 
+            // shdc with multiple `-l` slangs in one invocation produces a single reflection.yaml whose
+            // top-level `shaders:` list has one entry per slang (each carrying its own per-stage source
+            // paths and slang-specific register fields). Emit a separate factory file per (program, slang)
+            // pair so each registers itself under the matching sg_backend at module load.
             foreach (var shObj in shaders)
             {
                 if (!(shObj is Dictionary<string, object> sh)) continue;
                 if (!(GetVal(sh, "slang") is string slang)) continue;
-                if (slang != "metal_macos") continue; // v1: Metal only
+                var binding = SlangBindings.For(slang);
+                if (binding == null) continue; // unknown slang — skip rather than emit broken code
                 if (!(GetVal(sh, "programs") is List<object> programs)) continue;
                 foreach (var pObj in programs)
                 {
                     if (pObj is Dictionary<string, object> p)
-                        EmitProgram(ctx, p, allFiles);
+                        EmitProgram(ctx, p, allFiles, slang, binding);
                 }
             }
         }
 
-        private static void EmitProgram(SourceProductionContext ctx, Dictionary<string, object> p, ImmutableArray<AdditionalText> allFiles)
+        /// <summary>
+        /// Per-slang naming conventions in shdc's reflection. Captures (a) the runtime sg_backend
+        /// the slang targets, (b) the YAML field giving each uniform-block / texture / sampler its
+        /// backend-specific register slot, and (c) whether texture_sampler_pairs need glsl_name set
+        /// (sokol validates that on GL backends; Metal/D3D11 ignore it).
+        /// </summary>
+        private sealed class SlangBinding
+        {
+            public string Backend = "";          // sg_backend enum const
+            public string UbRegisterField = "";   // yaml key for uniform-block register slot per backend
+            public string TexRegisterField = "";  // yaml key for texture register slot
+            public string SmpRegisterField = "";  // yaml key for sampler register slot
+            public string DescField = "";         // sg_shader_desc field name (msl_buffer_n / hlsl_register_b_n / ...)
+            public string DescTexField = "";
+            public string DescSmpField = "";
+            public bool PairsNeedGlslName;        // emit texture_sampler_pairs[i].glsl_name?
+        }
+
+        private static class SlangBindings
+        {
+            public static SlangBinding For(string slang)
+            {
+                switch (slang)
+                {
+                    case "metal_macos": return Metal("SG_BACKEND_METAL_MACOS");
+                    case "metal_ios":   return Metal("SG_BACKEND_METAL_IOS");
+                    case "metal_sim":   return Metal("SG_BACKEND_METAL_SIMULATOR");
+                    case "hlsl4":
+                    case "hlsl5":       return Hlsl();
+                    case "glsl410":
+                    case "glsl430":     return Glsl("SG_BACKEND_GLCORE");
+                    case "glsl300es":
+                    case "glsl310es":   return Glsl("SG_BACKEND_GLES3");
+                    case "wgsl":        return Wgsl();
+                    default: return null;
+                }
+            }
+
+            // Metal: the buffer/texture/sampler index in MSL is the yaml's msl_*_n field, mapped to
+            // sg_shader_desc.{uniform_blocks,views.texture,samplers}.msl_*_n. Texture-sampler pairs
+            // exist on Metal but don't need a name (Metal binds texture+sampler independently).
+            private static SlangBinding Metal(string backend) => new SlangBinding {
+                Backend = backend,
+                UbRegisterField = "msl_buffer_n",  TexRegisterField = "msl_texture_n", SmpRegisterField = "msl_sampler_n",
+                DescField = "msl_buffer_n",        DescTexField = "msl_texture_n",     DescSmpField = "msl_sampler_n",
+                PairsNeedGlslName = false,
+            };
+
+            // HLSL5/D3D11: hlsl_register_{b,t,s}_n give the cbuffer / SRV / sampler register indices,
+            // which sg_shader_desc surfaces as hlsl_register_{b,t,s}_n on the same structures.
+            private static SlangBinding Hlsl() => new SlangBinding {
+                Backend = "SG_BACKEND_D3D11",
+                UbRegisterField = "hlsl_register_b_n", TexRegisterField = "hlsl_register_t_n", SmpRegisterField = "hlsl_register_s_n",
+                DescField = "hlsl_register_b_n",       DescTexField = "hlsl_register_t_n",     DescSmpField = "hlsl_register_s_n",
+                PairsNeedGlslName = false,
+            };
+
+            // GL: no per-backend register field on uniform_blocks / views / samplers (sokol_gfx uses
+            // `slot` directly). texture_sampler_pairs DO need glsl_name — sokol validates it on GL —
+            // and the yaml conveniently provides it on each pair entry.
+            private static SlangBinding Glsl(string backend) => new SlangBinding {
+                Backend = backend,
+                UbRegisterField = null, TexRegisterField = null, SmpRegisterField = null,
+                DescField = null,       DescTexField = null,     DescSmpField = null,
+                PairsNeedGlslName = true,
+            };
+
+            // WebGPU shares structure with HLSL/Metal for these knobs but uses wgsl_group{0,1}_binding_n.
+            // We don't have a Zinc-side WGPU runtime yet; emit the file so the slang isn't broken if
+            // someone toggles it on, but it won't be reachable until Engine boots with a wgpu backend.
+            private static SlangBinding Wgsl() => new SlangBinding {
+                Backend = "SG_BACKEND_WGPU",
+                UbRegisterField = "wgsl_group0_binding_n", TexRegisterField = "wgsl_group1_binding_n", SmpRegisterField = "wgsl_group1_binding_n",
+                DescField = "wgsl_group0_binding_n",       DescTexField = "wgsl_group1_binding_n",     DescSmpField = "wgsl_group1_binding_n",
+                PairsNeedGlslName = false,
+            };
+        }
+
+        private static void EmitProgram(SourceProductionContext ctx, Dictionary<string, object> p, ImmutableArray<AdditionalText> allFiles, string slang, SlangBinding binding)
         {
             if (!(GetVal(p, "name") is string name)) return;
             var vf = GetVal(p, "vertex_func") as Dictionary<string, object>;
@@ -210,40 +293,37 @@ namespace Zinc.Magic
 
             var vsSrc = FindContent(allFiles, GetVal(vf, "path") as string, ctx);
             var fsSrc = FindContent(allFiles, GetVal(ff, "path") as string, ctx);
-            if (vsSrc == null || fsSrc == null) return; // metal sources not present yet (pre-build)
+            if (vsSrc == null || fsSrc == null) return; // per-stage sources not present yet (pre-build)
 
-            var vsEntry = GetVal(vf, "entry_point") as string ?? "main0";
-            var fsEntry = GetVal(ff, "entry_point") as string ?? "main0";
+            // Metal's MSL entry point is "main0" (SPIRV-Cross's default rename); HLSL & GLSL both use
+            // plain "main". We trust whatever the reflection yaml says rather than hardcoding here.
+            var vsEntry = GetVal(vf, "entry_point") as string ?? "main";
+            var fsEntry = GetVal(ff, "entry_point") as string ?? "main";
             var vsB64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(vsSrc));
             var fsB64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(fsSrc));
 
-            var sb = new StringBuilder();
-            sb.AppendLine("// <auto-generated/> Zinc.Magic compiled shader (metal_macos)");
-            sb.AppendLine("using System;");
-            sb.AppendLine("using Zinc.Internal.Sokol;");
-            sb.AppendLine("namespace Res.Generated");
-            sb.AppendLine("{");
-            sb.AppendLine($"    internal static class Shader_{name}__metal_macos");
-            sb.AppendLine("    {");
-            sb.AppendLine("        [System.Runtime.CompilerServices.ModuleInitializer]");
-            sb.AppendLine($"        internal static void Init() => global::Res.Assets.{name}.SetFactory(Make);");
-            sb.AppendLine($"        static readonly byte[] _vs = Dec(\"{vsB64}\");");
-            sb.AppendLine($"        static readonly byte[] _fs = Dec(\"{fsB64}\");");
-            sb.AppendLine($"        static readonly byte[] _ve = Ent(\"{vsEntry}\");");
-            sb.AppendLine($"        static readonly byte[] _fe = Ent(\"{fsEntry}\");");
-            sb.AppendLine("        static byte[] Dec(string b){ var s = Convert.FromBase64String(b); var r = new byte[s.Length + 1]; Array.Copy(s, r, s.Length); return r; }");
-            sb.AppendLine("        static byte[] Ent(string s){ var b = System.Text.Encoding.ASCII.GetBytes(s); var r = new byte[b.Length + 1]; Array.Copy(b, r, b.Length); return r; }");
-            sb.AppendLine("        internal static unsafe sg_shader Make(sg_backend backend)");
-            sb.AppendLine("        {");
-            sb.AppendLine("            if (backend != sg_backend.SG_BACKEND_METAL_MACOS)");
-            sb.AppendLine($"                throw new NotSupportedException(\"Shader '{name}' was only compiled for Metal (macOS); backend \" + backend + \" is unsupported.\");");
-            sb.AppendLine("            fixed (byte* vs = _vs) fixed (byte* fs = _fs) fixed (byte* ve = _ve) fixed (byte* fe = _fe)");
-            sb.AppendLine("            {");
-            sb.AppendLine("                sg_shader_desc d = default;");
-            sb.AppendLine("                d.vertex_func.source = (sbyte*)vs;");
-            sb.AppendLine("                d.vertex_func.entry = (sbyte*)ve;");
-            sb.AppendLine("                d.fragment_func.source = (sbyte*)fs;");
-            sb.AppendLine("                d.fragment_func.entry = (sbyte*)fe;");
+            // Pinning plan: every C-string we hand to sokol (the source code, entry-point names, plus
+            // HLSL semantic names and GL sampler-pair names) must point at memory the GC can't move
+            // for the duration of the `Gfx.make_shader` call. We collect all pinnables first, emit
+            // them as static byte[] fields, then open ONE nested `fixed(...)` chain at the top of
+            // Make() so every pointer in `sg_shader_desc` is valid through the whole call. Trying
+            // to pin per-statement is wrong: the pointer becomes dangling the instant the `fixed`
+            // statement ends, and sg_make_shader doesn't read until later.
+            var pinnables = new List<(string Field, string Bytes)>
+            {
+                ("_vs", $"Dec(\"{vsB64}\")"),
+                ("_fs", $"Dec(\"{fsB64}\")"),
+                ("_ve", $"Ent(\"{vsEntry}\")"),
+                ("_fe", $"Ent(\"{fsEntry}\")"),
+            };
+            // (field, pointer-var) tuples emitted into the body to wire each pinned pointer onto
+            // the sg_shader_desc field that needs it.
+            var bodyLines = new List<string>();
+            bodyLines.Add("                sg_shader_desc d = default;");
+            bodyLines.Add("                d.vertex_func.source = (sbyte*)_vsP;");
+            bodyLines.Add("                d.vertex_func.entry = (sbyte*)_veP;");
+            bodyLines.Add("                d.fragment_func.source = (sbyte*)_fsP;");
+            bodyLines.Add("                d.fragment_func.entry = (sbyte*)_feP;");
 
             if (GetVal(p, "attrs") is List<object> attrs)
             {
@@ -252,7 +332,21 @@ namespace Zinc.Magic
                     if (!(aObj is Dictionary<string, object> a)) continue;
                     var slot = GetVal(a, "slot") as string ?? "0";
                     var bt = (GetVal(a, "base_type") as string) ?? "Float";
-                    sb.AppendLine($"                d.attrs[{slot}].base_type = sg_shader_attr_base_type.{AttrBaseType(bt)};");
+                    bodyLines.Add($"                d.attrs[{slot}].base_type = sg_shader_attr_base_type.{AttrBaseType(bt)};");
+                    // HLSL needs the input-layout's semantic name + index (so it matches the
+                    // signature baked into the compiled shader bytecode). Metal/GL/WGPU ignore it.
+                    if (slang == "hlsl4" || slang == "hlsl5")
+                    {
+                        var sem = GetVal(a, "hlsl_sem_name") as string;
+                        var idx = GetVal(a, "hlsl_sem_index") as string ?? "0";
+                        if (!string.IsNullOrEmpty(sem))
+                        {
+                            var field = $"_aSem{slot}";
+                            pinnables.Add((field, $"Ent(\"{sem}\")"));
+                            bodyLines.Add($"                d.attrs[{slot}].hlsl_sem_name = (sbyte*){field}P;");
+                            bodyLines.Add($"                d.attrs[{slot}].hlsl_sem_index = {idx};");
+                        }
+                    }
                 }
             }
 
@@ -264,11 +358,14 @@ namespace Zinc.Magic
                     var slot = GetVal(u, "slot") as string ?? "0";
                     var stage = GetVal(u, "stage") as string ?? "fragment";
                     var size = GetVal(u, "size") as string ?? "0";
-                    var msl = GetVal(u, "msl_buffer_n") as string ?? slot;
-                    sb.AppendLine($"                d.uniform_blocks[{slot}].stage = sg_shader_stage.{Stage(stage)};");
-                    sb.AppendLine($"                d.uniform_blocks[{slot}].layout = sg_uniform_layout.SG_UNIFORMLAYOUT_STD140;");
-                    sb.AppendLine($"                d.uniform_blocks[{slot}].size = {size};");
-                    sb.AppendLine($"                d.uniform_blocks[{slot}].msl_buffer_n = {msl};");
+                    bodyLines.Add($"                d.uniform_blocks[{slot}].stage = sg_shader_stage.{Stage(stage)};");
+                    bodyLines.Add($"                d.uniform_blocks[{slot}].layout = sg_uniform_layout.SG_UNIFORMLAYOUT_STD140;");
+                    bodyLines.Add($"                d.uniform_blocks[{slot}].size = {size};");
+                    if (binding.DescField != null)
+                    {
+                        var reg = GetVal(u, binding.UbRegisterField) as string ?? slot;
+                        bodyLines.Add($"                d.uniform_blocks[{slot}].{binding.DescField} = {reg};");
+                    }
                 }
             }
 
@@ -285,12 +382,15 @@ namespace Zinc.Magic
                     var imgType = GetVal(t, "type") as string ?? "2d";
                     var sampleType = GetVal(t, "sample_type") as string ?? "float";
                     var multisampled = string.Equals(GetVal(t, "multisampled") as string, "true", StringComparison.OrdinalIgnoreCase);
-                    var mslTex = GetVal(t, "msl_texture_n") as string ?? slot;
-                    sb.AppendLine($"                d.views[{slot}].texture.stage = sg_shader_stage.{Stage(stage)};");
-                    sb.AppendLine($"                d.views[{slot}].texture.image_type = sg_image_type.{ImageType(imgType)};");
-                    sb.AppendLine($"                d.views[{slot}].texture.sample_type = sg_image_sample_type.{SampleType(sampleType)};");
-                    sb.AppendLine($"                d.views[{slot}].texture.multisampled = {(multisampled ? "1" : "0")};");
-                    sb.AppendLine($"                d.views[{slot}].texture.msl_texture_n = {mslTex};");
+                    bodyLines.Add($"                d.views[{slot}].texture.stage = sg_shader_stage.{Stage(stage)};");
+                    bodyLines.Add($"                d.views[{slot}].texture.image_type = sg_image_type.{ImageType(imgType)};");
+                    bodyLines.Add($"                d.views[{slot}].texture.sample_type = sg_image_sample_type.{SampleType(sampleType)};");
+                    bodyLines.Add($"                d.views[{slot}].texture.multisampled = {(multisampled ? "1" : "0")};");
+                    if (binding.DescTexField != null)
+                    {
+                        var reg = GetVal(t, binding.TexRegisterField) as string ?? slot;
+                        bodyLines.Add($"                d.views[{slot}].texture.{binding.DescTexField} = {reg};");
+                    }
                 }
             }
 
@@ -302,15 +402,19 @@ namespace Zinc.Magic
                     var slot = GetVal(s, "slot") as string ?? "0";
                     var stage = GetVal(s, "stage") as string ?? "fragment";
                     var smpType = GetVal(s, "sampler_type") as string ?? "filtering";
-                    var mslSmp = GetVal(s, "msl_sampler_n") as string ?? slot;
-                    sb.AppendLine($"                d.samplers[{slot}].stage = sg_shader_stage.{Stage(stage)};");
-                    sb.AppendLine($"                d.samplers[{slot}].sampler_type = sg_sampler_type.{SamplerType(smpType)};");
-                    sb.AppendLine($"                d.samplers[{slot}].msl_sampler_n = {mslSmp};");
+                    bodyLines.Add($"                d.samplers[{slot}].stage = sg_shader_stage.{Stage(stage)};");
+                    bodyLines.Add($"                d.samplers[{slot}].sampler_type = sg_sampler_type.{SamplerType(smpType)};");
+                    if (binding.DescSmpField != null)
+                    {
+                        var reg = GetVal(s, binding.SmpRegisterField) as string ?? slot;
+                        bodyLines.Add($"                d.samplers[{slot}].{binding.DescSmpField} = {reg};");
+                    }
                 }
             }
 
-            // Every texture view must be referenced by a texture-sampler pair (sokol validation);
-            // glsl_name is only required on GL backends, so it's omitted for metal_macos.
+            // Every texture view must be referenced by a texture-sampler pair (sokol validation).
+            // glsl_name is required on GL backends so the linker can match the sampler to its
+            // declaration in the generated GLSL; Metal/D3D11 ignore it (the pair is bound positionally).
             if (GetVal(p, "texture_sampler_pairs") is List<object> pairs)
             {
                 foreach (var prObj in pairs)
@@ -320,19 +424,57 @@ namespace Zinc.Magic
                     var stage = GetVal(pr, "stage") as string ?? "fragment";
                     var viewSlot = GetVal(pr, "view_slot") as string ?? "0";
                     var smpSlot = GetVal(pr, "sampler_slot") as string ?? "0";
-                    sb.AppendLine($"                d.texture_sampler_pairs[{slot}].stage = sg_shader_stage.{Stage(stage)};");
-                    sb.AppendLine($"                d.texture_sampler_pairs[{slot}].view_slot = {viewSlot};");
-                    sb.AppendLine($"                d.texture_sampler_pairs[{slot}].sampler_slot = {smpSlot};");
+                    bodyLines.Add($"                d.texture_sampler_pairs[{slot}].stage = sg_shader_stage.{Stage(stage)};");
+                    bodyLines.Add($"                d.texture_sampler_pairs[{slot}].view_slot = {viewSlot};");
+                    bodyLines.Add($"                d.texture_sampler_pairs[{slot}].sampler_slot = {smpSlot};");
+                    if (binding.PairsNeedGlslName)
+                    {
+                        var glslName = GetVal(pr, "glsl_name") as string;
+                        if (!string.IsNullOrEmpty(glslName))
+                        {
+                            var field = $"_pName{slot}";
+                            pinnables.Add((field, $"Ent(\"{glslName}\")"));
+                            bodyLines.Add($"                d.texture_sampler_pairs[{slot}].glsl_name = (sbyte*){field}P;");
+                        }
+                    }
                 }
             }
 
+            // Stitch it together: static byte[] fields, the Make() prelude, one big nested fixed
+            // chain over every pinnable, then the body, then make_shader.
+            var sb = new StringBuilder();
+            sb.AppendLine($"// <auto-generated/> Zinc.Magic compiled shader ({slang})");
+            sb.AppendLine("using System;");
+            sb.AppendLine("using Zinc.Internal.Sokol;");
+            sb.AppendLine("namespace Res.Generated");
+            sb.AppendLine("{");
+            sb.AppendLine($"    internal static class Shader_{name}__{slang}");
+            sb.AppendLine("    {");
+            sb.AppendLine("        [System.Runtime.CompilerServices.ModuleInitializer]");
+            sb.AppendLine($"        internal static void Init() => global::Res.Assets.{name}.RegisterFactory(sg_backend.{binding.Backend}, Make);");
+            foreach (var (field, init) in pinnables)
+                sb.AppendLine($"        static readonly byte[] {field} = {init};");
+            sb.AppendLine("        static byte[] Dec(string b){ var s = Convert.FromBase64String(b); var r = new byte[s.Length + 1]; Array.Copy(s, r, s.Length); return r; }");
+            sb.AppendLine("        static byte[] Ent(string s){ var b = System.Text.Encoding.ASCII.GetBytes(s); var r = new byte[b.Length + 1]; Array.Copy(b, r, b.Length); return r; }");
+            sb.AppendLine("        internal static unsafe sg_shader Make(sg_backend backend)");
+            sb.AppendLine("        {");
+            sb.AppendLine($"            if (backend != sg_backend.{binding.Backend})");
+            sb.AppendLine($"                throw new NotSupportedException(\"Shader '{name}' was compiled for {slang} ({binding.Backend}); runtime backend \" + backend + \" is a mismatch — check RegisterFactory wiring.\");");
+            // One big nested fixed-chain: every pinnable byte[] => its `*P` pointer. C# allows
+            // adjacent `fixed(...)` clauses with no `{}` between them as a stacked form, all in
+            // scope for the single body block that follows.
+            foreach (var (field, _) in pinnables)
+                sb.AppendLine($"            fixed (byte* {field}P = {field})");
+            sb.AppendLine("            {");
+            foreach (var line in bodyLines)
+                sb.AppendLine(line);
             sb.AppendLine("                return Gfx.make_shader(&d);");
             sb.AppendLine("            }");
             sb.AppendLine("        }");
             sb.AppendLine("    }");
             sb.AppendLine("}");
 
-            ctx.AddSource($"Shader_{name}__metal_macos.g.cs", sb.ToString());
+            ctx.AddSource($"Shader_{name}__{slang}.g.cs", sb.ToString());
         }
 
         private static string AttrBaseType(string s)
