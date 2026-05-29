@@ -218,9 +218,11 @@ namespace Zinc.Magic
             public string UbRegisterField = "";   // yaml key for uniform-block register slot per backend
             public string TexRegisterField = "";  // yaml key for texture register slot
             public string SmpRegisterField = "";  // yaml key for sampler register slot
+            public string SbRegisterField = "";   // yaml key for storage-buffer register slot (per backend)
             public string DescField = "";         // sg_shader_desc field name (msl_buffer_n / hlsl_register_b_n / ...)
             public string DescTexField = "";
             public string DescSmpField = "";
+            public string DescSbField = "";       // sg_shader_storage_buffer_view field name
             public bool PairsNeedGlslName;        // emit texture_sampler_pairs[i].glsl_name?
         }
 
@@ -247,39 +249,43 @@ namespace Zinc.Magic
             // Metal: the buffer/texture/sampler index in MSL is the yaml's msl_*_n field, mapped to
             // sg_shader_desc.{uniform_blocks,views.texture,samplers}.msl_*_n. Texture-sampler pairs
             // exist on Metal but don't need a name (Metal binds texture+sampler independently).
+            // Storage buffers on Metal also use the MSL buffer index (separate from UBO indices).
             private static SlangBinding Metal(string backend) => new SlangBinding {
                 Backend = backend,
-                UbRegisterField = "msl_buffer_n",  TexRegisterField = "msl_texture_n", SmpRegisterField = "msl_sampler_n",
-                DescField = "msl_buffer_n",        DescTexField = "msl_texture_n",     DescSmpField = "msl_sampler_n",
+                UbRegisterField = "msl_buffer_n",  TexRegisterField = "msl_texture_n", SmpRegisterField = "msl_sampler_n", SbRegisterField = "msl_buffer_n",
+                DescField = "msl_buffer_n",        DescTexField = "msl_texture_n",     DescSmpField = "msl_sampler_n",     DescSbField = "msl_buffer_n",
                 PairsNeedGlslName = false,
             };
 
             // HLSL5/D3D11: hlsl_register_{b,t,s}_n give the cbuffer / SRV / sampler register indices,
             // which sg_shader_desc surfaces as hlsl_register_{b,t,s}_n on the same structures.
+            // Readonly storage buffers bind to `t` registers (SRVs); RW buffers (compute) bind to `u`.
+            // We only emit `t` here since vertex/fragment SSBOs must be readonly per sokol's contract.
             private static SlangBinding Hlsl() => new SlangBinding {
                 Backend = "SG_BACKEND_D3D11",
-                UbRegisterField = "hlsl_register_b_n", TexRegisterField = "hlsl_register_t_n", SmpRegisterField = "hlsl_register_s_n",
-                DescField = "hlsl_register_b_n",       DescTexField = "hlsl_register_t_n",     DescSmpField = "hlsl_register_s_n",
+                UbRegisterField = "hlsl_register_b_n", TexRegisterField = "hlsl_register_t_n", SmpRegisterField = "hlsl_register_s_n", SbRegisterField = "hlsl_register_t_n",
+                DescField = "hlsl_register_b_n",       DescTexField = "hlsl_register_t_n",     DescSmpField = "hlsl_register_s_n",     DescSbField = "hlsl_register_t_n",
                 PairsNeedGlslName = false,
             };
 
             // GL: no per-backend register field on uniform_blocks / views / samplers (sokol_gfx uses
             // `slot` directly). texture_sampler_pairs DO need glsl_name — sokol validates it on GL —
-            // and the yaml conveniently provides it on each pair entry.
+            // and the yaml conveniently provides it on each pair entry. Storage buffers DO need
+            // glsl_binding_n on GL since the binding qualifier in the generated GLSL is what the
+            // driver matches against; the yaml emits it.
             private static SlangBinding Glsl(string backend) => new SlangBinding {
                 Backend = backend,
-                UbRegisterField = null, TexRegisterField = null, SmpRegisterField = null,
-                DescField = null,       DescTexField = null,     DescSmpField = null,
+                UbRegisterField = null, TexRegisterField = null, SmpRegisterField = null, SbRegisterField = "glsl_binding_n",
+                DescField = null,       DescTexField = null,     DescSmpField = null,     DescSbField = "glsl_binding_n",
                 PairsNeedGlslName = true,
             };
 
             // WebGPU shares structure with HLSL/Metal for these knobs but uses wgsl_group{0,1}_binding_n.
-            // We don't have a Zinc-side WGPU runtime yet; emit the file so the slang isn't broken if
-            // someone toggles it on, but it won't be reachable until Engine boots with a wgpu backend.
+            // Storage buffers in WGPU live in bind group 1 alongside textures/samplers.
             private static SlangBinding Wgsl() => new SlangBinding {
                 Backend = "SG_BACKEND_WGPU",
-                UbRegisterField = "wgsl_group0_binding_n", TexRegisterField = "wgsl_group1_binding_n", SmpRegisterField = "wgsl_group1_binding_n",
-                DescField = "wgsl_group0_binding_n",       DescTexField = "wgsl_group1_binding_n",     DescSmpField = "wgsl_group1_binding_n",
+                UbRegisterField = "wgsl_group0_binding_n", TexRegisterField = "wgsl_group1_binding_n", SmpRegisterField = "wgsl_group1_binding_n", SbRegisterField = "wgsl_group1_binding_n",
+                DescField = "wgsl_group0_binding_n",       DescTexField = "wgsl_group1_binding_n",     DescSmpField = "wgsl_group1_binding_n",     DescSbField = "wgsl_group1_binding_n",
                 PairsNeedGlslName = false,
             };
         }
@@ -369,27 +375,50 @@ namespace Zinc.Magic
                 }
             }
 
-            // Sampled textures. Reflection nests each under a `texture:` key (the other view kinds
-            // are storage_buffer/storage_image, which sgp shaders don't use).
+            // Views: sokol_gfx's unified handle for everything that lives in a descriptor slot.
+            // The yaml nests each entry under one of:
+            //   texture:        sampled image (the sgp default)
+            //   storage_buffer: readonly SSBO for vertex/fragment, RW for compute (we only support
+            //                    readonly in v/f because sokol's contract requires it)
+            //   storage_image:  not yet emitted (no upstream demand)
             if (GetVal(p, "views") is List<object> views)
             {
                 foreach (var vObj in views)
                 {
                     if (!(vObj is Dictionary<string, object> v)) continue;
-                    if (!(GetVal(v, "texture") is Dictionary<string, object> t)) continue;
-                    var slot = GetVal(t, "slot") as string ?? "0";
-                    var stage = GetVal(t, "stage") as string ?? "fragment";
-                    var imgType = GetVal(t, "type") as string ?? "2d";
-                    var sampleType = GetVal(t, "sample_type") as string ?? "float";
-                    var multisampled = string.Equals(GetVal(t, "multisampled") as string, "true", StringComparison.OrdinalIgnoreCase);
-                    bodyLines.Add($"                d.views[{slot}].texture.stage = sg_shader_stage.{Stage(stage)};");
-                    bodyLines.Add($"                d.views[{slot}].texture.image_type = sg_image_type.{ImageType(imgType)};");
-                    bodyLines.Add($"                d.views[{slot}].texture.sample_type = sg_image_sample_type.{SampleType(sampleType)};");
-                    bodyLines.Add($"                d.views[{slot}].texture.multisampled = {(multisampled ? "1" : "0")};");
-                    if (binding.DescTexField != null)
+
+                    if (GetVal(v, "texture") is Dictionary<string, object> t)
                     {
-                        var reg = GetVal(t, binding.TexRegisterField) as string ?? slot;
-                        bodyLines.Add($"                d.views[{slot}].texture.{binding.DescTexField} = {reg};");
+                        var slot = GetVal(t, "slot") as string ?? "0";
+                        var stage = GetVal(t, "stage") as string ?? "fragment";
+                        var imgType = GetVal(t, "type") as string ?? "2d";
+                        var sampleType = GetVal(t, "sample_type") as string ?? "float";
+                        var multisampled = string.Equals(GetVal(t, "multisampled") as string, "true", StringComparison.OrdinalIgnoreCase);
+                        bodyLines.Add($"                d.views[{slot}].texture.stage = sg_shader_stage.{Stage(stage)};");
+                        bodyLines.Add($"                d.views[{slot}].texture.image_type = sg_image_type.{ImageType(imgType)};");
+                        bodyLines.Add($"                d.views[{slot}].texture.sample_type = sg_image_sample_type.{SampleType(sampleType)};");
+                        bodyLines.Add($"                d.views[{slot}].texture.multisampled = {(multisampled ? "1" : "0")};");
+                        if (binding.DescTexField != null)
+                        {
+                            var reg = GetVal(t, binding.TexRegisterField) as string ?? slot;
+                            bodyLines.Add($"                d.views[{slot}].texture.{binding.DescTexField} = {reg};");
+                        }
+                    }
+                    else if (GetVal(v, "storage_buffer") is Dictionary<string, object> sbView)
+                    {
+                        var slot = GetVal(sbView, "slot") as string ?? "0";
+                        var stage = GetVal(sbView, "stage") as string ?? "vertex";
+                        // shdc always marks vertex/fragment SSBOs readonly:true in the yaml. We mirror
+                        // that into sg_shader_storage_buffer_view.readonly (the C# field uses @readonly
+                        // since `readonly` is a reserved keyword).
+                        var readOnly = !string.Equals(GetVal(sbView, "readonly") as string, "false", StringComparison.OrdinalIgnoreCase);
+                        bodyLines.Add($"                d.views[{slot}].storage_buffer.stage = sg_shader_stage.{Stage(stage)};");
+                        bodyLines.Add($"                d.views[{slot}].storage_buffer.@readonly = {(readOnly ? "1" : "0")};");
+                        if (binding.DescSbField != null)
+                        {
+                            var reg = GetVal(sbView, binding.SbRegisterField) as string ?? slot;
+                            bodyLines.Add($"                d.views[{slot}].storage_buffer.{binding.DescSbField} = {reg};");
+                        }
                     }
                 }
             }
