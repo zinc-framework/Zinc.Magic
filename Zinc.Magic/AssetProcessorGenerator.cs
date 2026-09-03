@@ -40,6 +40,12 @@ namespace Zinc.Magic
                 if (string.IsNullOrEmpty(ext))
                     continue;
 
+                // Skip dotfiles (.DS_Store, .gitignore, etc.) — Finder & friends drop these
+                // into res/ and they're never real assets. They'd otherwise crash the router
+                // because GetFileNameWithoutExtension returns "" for a leading-dot name.
+                if (string.IsNullOrEmpty(Path.GetFileNameWithoutExtension(path)))
+                    continue;
+
                 // shdc reflection lands in the intermediate (obj) dir, not res/ — match it
                 // by suffix wherever it is. It drives the build-time sg_shader factory.
                 if (path.EndsWith("_reflection.yaml", StringComparison.OrdinalIgnoreCase))
