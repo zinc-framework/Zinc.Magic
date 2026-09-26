@@ -10,12 +10,20 @@
         <IsRoslynComponent>true</IsRoslynComponent>
         <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
         <IncludeBuildOutput>false</IncludeBuildOutput>
+        <!-- Analyzer-only package: the compiler supplies Roslyn when it loads the generator. Without
+             this the Roslyn references become package dependencies, and every consuming game ships
+             the Roslyn assemblies in its output. -->
+        <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
 
         <RootNamespace>Zinc.Magic</RootNamespace>
         <PackageId>Zinc.Magic</PackageId>
-         <Version>1.0.10</Version>
+         <Version>1.0.11</Version>
         <Authors>Kyle Kukshtel</Authors>
         <Company>Afterschool Studio</Company>
+        <Description>Zinc source generator: typed Res.Assets handles for the files in a project's res/ folder, and typed shaders from sokol-shdc GLSL.</Description>
+        <PackageLicenseExpression>MIT</PackageLicenseExpression>
+        <RepositoryUrl>https://github.com/zinc-framework/Zinc.Magic</RepositoryUrl>
+        <RepositoryType>git</RepositoryType>
         <!-- <PackageOutputPath>$(MSBuildThisFileDirectory)..\..\..\..\..\artifacts\</PackageOutputPath> -->
     </PropertyGroup>
 
