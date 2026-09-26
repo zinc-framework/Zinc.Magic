@@ -20,6 +20,14 @@ public static class DirectoryInfoExtensions
         // Check if the base directory path contains the check path
         return checkFullPath.StartsWith(baseDirPath, StringComparison.OrdinalIgnoreCase);
     }
+
+    // The path of checkPath relative to baseDir, with '/' separators so the same string resolves on
+    // every platform regardless of where it was generated. Expects baseDir.ContainsPath(checkPath).
+    public static string GetRelativePath(this DirectoryInfo baseDir, string checkPath)
+    {
+        string baseDirPath = Path.GetFullPath(baseDir.FullName).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        return Path.GetFullPath(checkPath).Substring(baseDirPath.Length).Replace(Path.DirectorySeparatorChar, '/');
+    }
 }
 
 public static class File

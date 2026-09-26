@@ -31,6 +31,7 @@ namespace Zinc.Magic
             if (string.IsNullOrEmpty(projectDir))
                 return;
 
+            var projectPath = new DirectoryInfo(projectDir!);
             var resPath = new DirectoryInfo(Path.Combine(projectDir!, "res"));
 
             foreach (var file in files)
@@ -74,7 +75,11 @@ namespace Res;
 
 public static partial class Assets");
 
-                AssetRouter.RouteAsset(context, cw, file, ext);
+                // Emit the path relative to the project, not file.Path: that's absolute on the
+                // building machine, so a published build would look for its assets there. The
+                // consumer copies res/ into its output with the same layout, and Zinc resolves
+                // relative asset paths against the app's directory at runtime.
+                AssetRouter.RouteAsset(context, cw, file, projectPath.GetRelativePath(path), ext);
 
                 cw.CloseScope();
 
@@ -85,7 +90,7 @@ public static partial class Assets");
 
     public static class AssetRouter
     {
-        public static void RouteAsset(SourceProductionContext context, Utils.CodeWriter cw, AdditionalText t, string ext)
+        public static void RouteAsset(SourceProductionContext context, Utils.CodeWriter cw, AdditionalText t, string assetPath, string ext)
         {
             var compileFriendlyName = File.SanitizeFilename(Path.GetFileNameWithoutExtension(t.Path));
             switch (ext)
@@ -93,7 +98,7 @@ public static partial class Assets");
                 case ".png":
                 case ".jpeg":
                 case ".jpg":
-                    cw.AddLine($"public static TextureAsset {compileFriendlyName} = new(@\"{t.Path}\");");
+                    cw.AddLine($"public static TextureAsset {compileFriendlyName} = new(@\"{assetPath}\");");
                     break;
                 case ".aseprite":
                 case ".tmx":
