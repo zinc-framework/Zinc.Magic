@@ -17,7 +17,9 @@
 
         <RootNamespace>Zinc.Magic</RootNamespace>
         <PackageId>Zinc.Magic</PackageId>
-         <Version>1.0.11</Version>
+        <!-- Release versions come from the git tag: pushing vX.Y.Z publishes X.Y.Z (see
+             .github/workflows/publish.yml). This only names packages from local builds. -->
+        <Version>0.0.0-local</Version>
         <Authors>Kyle Kukshtel</Authors>
         <Company>Afterschool Studio</Company>
         <Description>Zinc source generator: typed Res.Assets handles for the files in a project's res/ folder, and typed shaders from sokol-shdc GLSL.</Description>
